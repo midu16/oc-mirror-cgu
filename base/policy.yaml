@@ -1,15 +1,25 @@
 # Generic oc-mirror Policy (inform) + hub-only Placement + PlacementBinding.
 # Placeholders (UPPER_CASE) are replaced by components/params from the overlay's params.env:
-#   RUN_NAME        -> Policy, PlacementBinding, Job, PVC, ISC ConfigMap names
-#   NAMESPACE       -> where SA/PVC/Job/ISC ConfigMap are created on the hub (e.g. cwl3-sno)
+#   RUN_NAME        -> Policy, PlacementBinding, Job, PVC, ISC ConfigMap, per-run Role/RoleBindings;
+#                      results ConfigMap is "<RUN_NAME>-results" (built by the printf templates)
+#   NAMESPACE       -> where SA/PVC/Job/Role/ISC + results ConfigMaps live on the hub (e.g. sno)
 #   AUTH_SECRET     -> existing pull secret (source + destination auths) in NAMESPACE
 #   OC_MIRROR_IMAGE -> oc-mirror image (e.g. the "oc-mirror" component of a release payload)
+#   CLI_IMAGE       -> image with oc + coreutils for the prepare/report stages ("cli" component)
 #   MIRROR_REGISTRY / MIRROR_PREFIX / DEST_TLS_VERIFY -> Job env, used in the oc-mirror command
 #   PVC_SIZE        -> workspace PVC size
 # Integer fields (backoffLimit, activeDeadlineSeconds) are overridden with overlay patches.
 #
-# Compliant == the Job has succeeded (status.succeeded is compared, never written), so the
-# CGU completes only once the mirror finished.
+# object-templates of oc-mirror-run (component replacements address them by index):
+#   [0] SA  [1] PVC  [2] Job  [3] Role results-writer  [4] RoleBinding results-writer
+#   [5] Role ingress-ca-reader (openshift-config-managed)  [6] RoleBinding ingress-ca-reader
+#
+# Two gates make the Policy Compliant only after a successful, reported run:
+#   oc-mirror-run    : Job status.succeeded == 1 (compared, never written)
+#   oc-mirror-report : ConfigMap <RUN_NAME>-results says runId=<RUN_NAME>, result=Success.
+#                      extraDependencies -> evaluated only after oc-mirror-run is Compliant, so
+#                      enforce never creates a fake "Success" ConfigMap (the report stage has
+#                      already published the real one before the Job can succeed).
 apiVersion: policy.open-cluster-management.io/v1
 kind: Policy
 metadata:
@@ -23,11 +33,13 @@ metadata:
     policy.open-cluster-management.io/controls: CM-2 Baseline Configuration
     policy.open-cluster-management.io/description: >-
       Run oc-mirror v2 (mirrorToMirror) on the hub with the ImageSetConfiguration held in
-      ConfigMap <NAMESPACE>/<RUN_NAME>, pushing to <MIRROR_REGISTRY>/<MIRROR_PREFIX>.
+      ConfigMap <NAMESPACE>/<RUN_NAME>, pushing to <MIRROR_REGISTRY>/<MIRROR_PREFIX> with the
+      cluster ingress CA trusted, and publish a report to <NAMESPACE>/<RUN_NAME>-results.
 spec:
   disabled: false
   remediationAction: inform
   policy-templates:
+    # ------------------------------------------------------------------ oc-mirror-run
     # The Policy READS the ISC ConfigMap through fromConfigMap (pod annotation below):
     #  - ConfigMap missing -> template error, NonCompliant, no Job created
     #  - ISC edited later  -> annotation differs from the immutable Job -> NonCompliant
@@ -68,7 +80,7 @@ spec:
                   resources:
                     requests:
                       storage: PVC_SIZE
-            # [2] the mirror Job
+            # [2] the mirror Job: prepare (CA bundle) -> mirror (oc-mirror) -> report
             - complianceType: musthave
               objectDefinition:
                 apiVersion: batch/v1
@@ -98,14 +110,59 @@ spec:
                         runAsNonRoot: true
                         seccompProfile:
                           type: RuntimeDefault
-                      containers:
-                        - name: oc-mirror
+                      initContainers:
+                        # Stage 1: trust bundle = system roots + cluster ingress CA, read at run
+                        # time from openshift-config-managed/default-ingress-cert (not pinned in
+                        # git; rotation is picked up by the next run).
+                        - name: prepare
+                          image: CLI_IMAGE
+                          command: ["/bin/bash", "-c"]
+                          args:
+                            - |
+                              set -uo pipefail
+                              mkdir -p /work/ca /work/run
+                              cat /etc/pki/tls/certs/ca-bundle.crt > /work/ca/bundle.crt
+                              if oc -n openshift-config-managed get configmap default-ingress-cert \
+                                   -o jsonpath='{.data.ca-bundle\.crt}' > /work/ca/ingress-ca.crt 2>/work/ca/err \
+                                 && [ -s /work/ca/ingress-ca.crt ]; then
+                                cat /work/ca/ingress-ca.crt >> /work/ca/bundle.crt
+                                echo "prepare: appended cluster ingress CA ($(grep -c BEGIN /work/ca/ingress-ca.crt) certs)"
+                              else
+                                echo "prepare: WARNING cannot read default-ingress-cert: $(cat /work/ca/err)" >&2
+                                echo "prepare: pushes to an ingress-signed registry will fail TLS verification" >&2
+                              fi
+                              [ -s /config/isc.yaml ] || { echo "prepare: FATAL /config/isc.yaml missing" >&2; exit 1; }
+                              rm -f /work/run/rc /work/run/result /work/run/oc-mirror.log
+                              date -u +%Y-%m-%dT%H:%M:%SZ > /work/run/started
+                          env:
+                            - name: HOME
+                              value: /work
+                          securityContext: &sec
+                            allowPrivilegeEscalation: false
+                            capabilities:
+                              drop: ["ALL"]
+                          resources:
+                            requests: {cpu: 100m, memory: 128Mi}
+                            limits: {memory: 512Mi}
+                          volumeMounts: &mounts
+                            - name: config
+                              mountPath: /config
+                              readOnly: true
+                            - name: auth
+                              mountPath: /auth
+                              readOnly: true
+                            - name: work
+                              mountPath: /work
+                        # Stage 2: the mirror. Always exits 0 so a failure still reaches the
+                        # report stage; the real exit code is persisted in /work/run/rc.
+                        - name: mirror
                           image: OC_MIRROR_IMAGE
                           command: ["/bin/sh", "-c"]
                           args:
                             - |
                               set -u
-                              echo "==== destination: docker://${MIRROR_REGISTRY}/${MIRROR_PREFIX} (dest-tls-verify=${DEST_TLS_VERIFY})"
+                              export SSL_CERT_FILE=/work/ca/bundle.crt
+                              echo "==== destination: docker://${MIRROR_REGISTRY}/${MIRROR_PREFIX} (dest-tls-verify=${DEST_TLS_VERIFY}, CA bundle ${SSL_CERT_FILE})"
                               /usr/bin/oc-mirror --v2 \
                                 -c /config/isc.yaml \
                                 --workspace file:///work/ws \
@@ -113,16 +170,13 @@ spec:
                                 --authfile /auth/.dockerconfigjson \
                                 --dest-tls-verify="${DEST_TLS_VERIFY}" \
                                 --parallel-images 4 --retry-times 5 --image-timeout 30m \
-                                "docker://${MIRROR_REGISTRY}/${MIRROR_PREFIX}"
+                                "docker://${MIRROR_REGISTRY}/${MIRROR_PREFIX}" > /work/run/oc-mirror.log 2>&1
                               rc=$?
+                              cat /work/run/oc-mirror.log
+                              echo "$rc" > /work/run/rc
+                              [ "$rc" -eq 0 ] && echo Success > /work/run/result || echo Failed > /work/run/result
                               echo "==== oc-mirror rc=$rc"
-                              echo "==== generated cluster-resources:"
-                              ls -l /work/ws/working-dir/cluster-resources/ 2>/dev/null
-                              for f in /work/ws/working-dir/cluster-resources/*.yaml; do
-                                case "$f" in *signature-configmap*) continue;; esac
-                                [ -f "$f" ] && { echo "---- $f"; cat "$f"; }
-                              done
-                              exit $rc
+                              exit 0
                           env:
                             - name: HOME
                               value: /work
@@ -132,25 +186,89 @@ spec:
                               value: MIRROR_PREFIX
                             - name: DEST_TLS_VERIFY
                               value: DEST_TLS_VERIFY
-                          securityContext:
-                            allowPrivilegeEscalation: false
-                            capabilities:
-                              drop: ["ALL"]
+                          securityContext: *sec
                           resources:
                             requests:
                               cpu: "1"
                               memory: 2Gi
                             limits:
                               memory: 8Gi
-                          volumeMounts:
-                            - name: config
-                              mountPath: /config
-                              readOnly: true
-                            - name: auth
-                              mountPath: /auth
-                              readOnly: true
-                            - name: work
-                              mountPath: /work
+                          volumeMounts: *mounts
+                      containers:
+                        # Stage 3: publish ConfigMap <RUN_NAME>-results, then re-raise a failed
+                        # mirror so the Job (and therefore the Policy/CGU) records the failure.
+                        - name: report
+                          image: CLI_IMAGE
+                          command: ["/bin/bash", "-c"]
+                          args:
+                            - |
+                              set -uo pipefail
+                              WD=/work/ws/working-dir; LOG=/work/run/oc-mirror.log; OUT=/tmp/report; mkdir -p $OUT
+                              RESULT=$(cat /work/run/result 2>/dev/null || echo Unknown)
+                              RC=$(cat /work/run/rc 2>/dev/null || echo 255)
+                              strip() { sed -e 's/\x1b\[[0-9;]*m//g' -e 's/^[0-9\/]\{10\} [0-9:]\{8\} *//' | tr -cd '\11\12\15\40-\176'; }
+                              {
+                                echo "runId:       ${RUN_NAME}"
+                                echo "destination: ${MIRROR_REGISTRY}/${MIRROR_PREFIX}"
+                                echo "tlsVerify:   ${DEST_TLS_VERIFY}"
+                                echo "result:      ${RESULT}"
+                                echo "exitCode:    ${RC}"
+                                echo "startedAt:   $(cat /work/run/started 2>/dev/null)"
+                                echo "finishedAt:  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                              } > $OUT/summary
+                              # image counts from oc-mirror's own Results block
+                              strip < $LOG 2>/dev/null | sed -n '/=== Results ===/,$p' \
+                                | grep -E 'images mirrored|release images|operator images|additional images|helm' > $OUT/images
+                              [ -s $OUT/images ] || echo "no Results block in log - mirror aborted before copying" > $OUT/images
+                              # generated cluster resources: listing + YAML inline (signature CM listed only)
+                              if [ -d $WD/cluster-resources ]; then
+                                (cd $WD/cluster-resources && ls -l | tail -n +2) > $OUT/files
+                                : > $OUT/clusterResources
+                                for f in $WD/cluster-resources/*.yaml; do
+                                  [ -e "$f" ] || continue
+                                  case "$(basename "$f")" in signature-configmap*) continue;; esac
+                                  { echo "### $(basename "$f")"; cat "$f"; echo; } >> $OUT/clusterResources
+                                done
+                              else
+                                echo "no cluster-resources directory was generated" > $OUT/files
+                              fi
+                              [ -s $OUT/clusterResources ] 2>/dev/null || echo "# none generated" > $OUT/clusterResources
+                              truncate -s '<250K' $OUT/clusterResources 2>/dev/null || true
+                              cat $WD/logs/mirroring_errors_*.txt 2>/dev/null | head -c 20000 > $OUT/errors
+                              [ -s $OUT/errors ] || echo "none" > $OUT/errors
+                              strip < $LOG 2>/dev/null | tail -c 20000 > $OUT/logTail
+                              [ -s $OUT/logTail ] || echo "no log produced" > $OUT/logTail
+                              oc create configmap "${RUN_NAME}-results" -n "${POD_NAMESPACE}" \
+                                --from-literal=runId="${RUN_NAME}" --from-literal=result="${RESULT}" \
+                                --from-file=summary=$OUT/summary --from-file=images=$OUT/images \
+                                --from-file=files=$OUT/files --from-file=clusterResources=$OUT/clusterResources \
+                                --from-file=errors=$OUT/errors --from-file=logTail=$OUT/logTail \
+                                --dry-run=client -o yaml \
+                                | oc label --local -f - -o yaml app.kubernetes.io/part-of=oc-mirror-cgu \
+                                | oc apply -f - || { echo "report: FAILED to publish ${RUN_NAME}-results" >&2; exit 2; }
+                              echo "================ oc-mirror report (${POD_NAMESPACE}/${RUN_NAME}-results) ================"
+                              cat $OUT/summary; echo "---- images ----"; cat $OUT/images; echo "---- files ----"; cat $OUT/files
+                              [ "$RESULT" = Success ] || exit 1
+                          env:
+                            - name: HOME
+                              value: /tmp
+                            - name: RUN_NAME
+                              value: RUN_NAME
+                            - name: MIRROR_REGISTRY
+                              value: MIRROR_REGISTRY
+                            - name: MIRROR_PREFIX
+                              value: MIRROR_PREFIX
+                            - name: DEST_TLS_VERIFY
+                              value: DEST_TLS_VERIFY
+                            - name: POD_NAMESPACE
+                              valueFrom:
+                                fieldRef:
+                                  fieldPath: metadata.namespace
+                          securityContext: *sec
+                          resources:
+                            requests: {cpu: 100m, memory: 128Mi}
+                            limits: {memory: 512Mi}
+                          volumeMounts: *mounts
                       volumes:
                         - name: config
                           configMap:
@@ -163,6 +281,103 @@ spec:
                             claimName: RUN_NAME
                 status:
                   succeeded: 1
+            # [3] Role: create ConfigMaps, read/patch only this run's results ConfigMap
+            - complianceType: musthave
+              objectDefinition:
+                apiVersion: rbac.authorization.k8s.io/v1
+                kind: Role
+                metadata:
+                  name: RUN_NAME
+                  namespace: NAMESPACE
+                  labels:
+                    app.kubernetes.io/part-of: oc-mirror-cgu
+                rules:
+                  - apiGroups: [""]
+                    resources: ["configmaps"]
+                    verbs: ["create"]
+                  - apiGroups: [""]
+                    resources: ["configmaps"]
+                    resourceNames: ['{{ printf "%s-results" "RUN_NAME" }}']
+                    verbs: ["get", "update", "patch"]
+            # [4] RoleBinding: SA oc-mirror -> Role RUN_NAME
+            - complianceType: musthave
+              objectDefinition:
+                apiVersion: rbac.authorization.k8s.io/v1
+                kind: RoleBinding
+                metadata:
+                  name: RUN_NAME
+                  namespace: NAMESPACE
+                  labels:
+                    app.kubernetes.io/part-of: oc-mirror-cgu
+                roleRef:
+                  apiGroup: rbac.authorization.k8s.io
+                  kind: Role
+                  name: RUN_NAME
+                subjects:
+                  - kind: ServiceAccount
+                    name: oc-mirror
+                    namespace: NAMESPACE
+            # [5] Role (shared, identical in every run): get default-ingress-cert only
+            - complianceType: musthave
+              objectDefinition:
+                apiVersion: rbac.authorization.k8s.io/v1
+                kind: Role
+                metadata:
+                  name: oc-mirror-ingress-ca-reader
+                  namespace: openshift-config-managed
+                  labels:
+                    app.kubernetes.io/part-of: oc-mirror-cgu
+                rules:
+                  - apiGroups: [""]
+                    resources: ["configmaps"]
+                    resourceNames: ["default-ingress-cert"]
+                    verbs: ["get"]
+            # [6] RoleBinding (per run, so runs in different NAMESPACEs don't fight over subjects)
+            - complianceType: musthave
+              objectDefinition:
+                apiVersion: rbac.authorization.k8s.io/v1
+                kind: RoleBinding
+                metadata:
+                  name: RUN_NAME
+                  namespace: openshift-config-managed
+                  labels:
+                    app.kubernetes.io/part-of: oc-mirror-cgu
+                roleRef:
+                  apiGroup: rbac.authorization.k8s.io
+                  kind: Role
+                  name: oc-mirror-ingress-ca-reader
+                subjects:
+                  - kind: ServiceAccount
+                    name: oc-mirror
+                    namespace: NAMESPACE
+    # ------------------------------------------------------------------ oc-mirror-report
+    # Run-specific report gate. Only evaluated once oc-mirror-run is Compliant (Job succeeded,
+    # which implies the report stage already published this ConfigMap).
+    - extraDependencies:
+        - apiVersion: policy.open-cluster-management.io/v1
+          kind: ConfigurationPolicy
+          name: oc-mirror-run
+          compliance: Compliant
+      objectDefinition:
+        apiVersion: policy.open-cluster-management.io/v1
+        kind: ConfigurationPolicy
+        metadata:
+          name: oc-mirror-report
+        spec:
+          remediationAction: inform
+          severity: medium
+          pruneObjectBehavior: None
+          object-templates:
+            - complianceType: musthave
+              objectDefinition:
+                apiVersion: v1
+                kind: ConfigMap
+                metadata:
+                  name: '{{ printf "%s-results" "RUN_NAME" }}'
+                  namespace: NAMESPACE
+                data:
+                  runId: RUN_NAME
+                  result: Success
 ---
 # Hub only: name=local-cluster AND local-cluster=true. Shared by all runs (identical content).
 apiVersion: cluster.open-cluster-management.io/v1beta1
