@@ -1,0 +1,20 @@
+# Shared by every run (overlay): root-policy namespace + ClusterSetBinding.
+# Root Policies must not live in a ManagedCluster namespace (e.g. cwl3-sno), so all
+# Policies/Placements/CGUs of all runs live here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ztp-oc-mirror
+  labels:
+    oc-mirror.ngc747/stage: "01"
+---
+# Lets Placements in ztp-oc-mirror select clusters of the "global" set (local-cluster is in it).
+apiVersion: cluster.open-cluster-management.io/v1beta2
+kind: ManagedClusterSetBinding
+metadata:
+  name: global
+  namespace: ztp-oc-mirror
+  labels:
+    oc-mirror.ngc747/stage: "01"
+spec:
+  clusterSet: global

@@ -1,0 +1,18 @@
+# TALM trigger. Name and managedPolicies[0] are set from RUN_NAME by components/params.
+# timeout is an integer: override it with a patch in the overlay (not via params.env).
+apiVersion: ran.openshift.io/v1alpha1
+kind: ClusterGroupUpgrade
+metadata:
+  name: RUN_NAME
+  namespace: ztp-oc-mirror
+  labels:
+    oc-mirror.ngc747/stage: "03"
+spec:
+  clusters:
+    - local-cluster
+  managedPolicies:
+    - RUN_NAME
+  enable: true
+  remediationStrategy:
+    maxConcurrency: 1
+    timeout: 240   # minutes; keep > Job activeDeadlineSeconds

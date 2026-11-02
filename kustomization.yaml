@@ -1,0 +1,21 @@
+# Entry point. Selects ONE run (overlay) for `oc apply -k .` from this directory.
+# Every overlay can also be applied directly: oc apply -k overlays/<name>
+#
+# Layout
+#   base/                 generic Namespace, Policy (+Placement, PlacementBinding), CGU
+#                         with UPPER_CASE placeholders; never applied on its own
+#   components/params/    kustomize Component: replacements that copy params.env values
+#                         into the base (names, namespace, registry, prefix, image, ...)
+#   overlays/<run>/       one oc-mirror run = params.env + isc.yaml (+ optional patches
+#                         for integer settings such as Job deadline / CGU timeout)
+#
+# Available overlays
+#   overlays/cwl3-sno-ocp-5.0.0-rc.7   candidate-5.0 5.0.0-rc.7, release only   (tested)
+#   overlays/cwl3-sno-ocp-5.0-stable   stable-5.0 5.0.0-5.0.2 + operators       (not run)
+#
+# New run (other version / spoke namespace / registry): copy an overlay, edit params.env
+# (RUN_NAME must be unique) and isc.yaml, then `oc kustomize overlays/<new>` to review.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - overlays/cwl3-sno-ocp-5.0.0-rc.7

@@ -1,0 +1,44 @@
+# Run: OCP 5.0.0 - 5.0.2 (stable-5.0) + redhat-operator-index:v5.0 (ACM, MCE, GitOps, ODF, ...)
+#      + additional images -> hub Quay quayadmin/ocp5, workload in hub namespace cwl3-sno.
+#
+# NOT RUN YET. Checked from the hub on 2026-11-02, these ISC entries do not resolve today:
+#   - channel stable-5.0 has 0 versions in the update graph (candidate-5.0 ends at 5.0.0-rc.8)
+#   - registry.redhat.io/openshift5/ztp-site-generate-rhel9:v5.0          -> unauthorized
+#   - registry.redhat.io/rhacm2/multicluster-operators-subscription-rhel9:v5.0 -> manifest unknown
+#   (redhat-operator-index:v5.0, ubi9/ubi:latest, rhel9/support-tools:latest exist)
+# Validate first with a --dry-run before applying (see README "Validate an ISC").
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+components:
+  - ../../components/params
+
+configMapGenerator:
+  - name: oc-mirror-params
+    envs: [params.env]
+    options:
+      disableNameSuffixHash: true
+      annotations:
+        config.kubernetes.io/local-config: "true"
+  - name: oc-mirror-isc
+    files: [isc.yaml]
+    options:
+      disableNameSuffixHash: true
+      labels:
+        app.kubernetes.io/part-of: oc-mirror-cgu
+        oc-mirror.ngc747/stage: "01"
+
+# Integer settings cannot come from params.env (replacements copy strings): patch them.
+# Releases + ~25 operator packages + extra images: allow 10 h for the Job, 11 h for the CGU.
+patches:
+  - target: {kind: Policy}
+    patch: |-
+      - op: replace
+        path: /spec/policy-templates/0/objectDefinition/spec/object-templates/2/objectDefinition/spec/activeDeadlineSeconds
+        value: 36000
+  - target: {kind: ClusterGroupUpgrade}
+    patch: |-
+      - op: replace
+        path: /spec/remediationStrategy/timeout
+        value: 660

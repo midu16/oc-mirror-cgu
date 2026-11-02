@@ -1,0 +1,78 @@
+# Reusable component: copies values from the overlay's params ConfigMap ("oc-mirror-params",
+# generated from params.env and marked local-config, so it is NOT applied) into the base.
+#
+# PT  = spec.policy-templates.0.objectDefinition.spec.object-templates
+# [0] = ServiceAccount, [1] = PVC, [2] = Job   (see base/policy.yaml)
+# Order matters: NAMESPACE runs before RUN_NAME renames the ISC ConfigMap (oc-mirror-isc).
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+replacements:
+  # ---------------------------------------------------------------- NAMESPACE (workload)
+  - source: {kind: ConfigMap, name: oc-mirror-params, fieldPath: data.NAMESPACE}
+    targets:
+      - select: {kind: Policy}
+        fieldPaths:
+          - spec.policy-templates.0.objectDefinition.spec.object-templates.0.objectDefinition.metadata.namespace
+          - spec.policy-templates.0.objectDefinition.spec.object-templates.1.objectDefinition.metadata.namespace
+          - spec.policy-templates.0.objectDefinition.spec.object-templates.2.objectDefinition.metadata.namespace
+      - select: {kind: Policy}
+        fieldPaths:
+          - spec.policy-templates.0.objectDefinition.spec.object-templates.2.objectDefinition.spec.template.metadata.annotations.[oc-mirror.ngc747/isc-b64]
+        options: {delimiter: '"', index: 1}
+      - select: {kind: ConfigMap, name: oc-mirror-isc}
+        fieldPaths: [metadata.namespace]
+        options: {create: true}
+
+  # ---------------------------------------------------------------- RUN_NAME
+  - source: {kind: ConfigMap, name: oc-mirror-params, fieldPath: data.RUN_NAME}
+    targets:
+      - select: {kind: Policy}
+        fieldPaths:
+          - metadata.name
+          - spec.policy-templates.0.objectDefinition.spec.object-templates.1.objectDefinition.metadata.name
+          - spec.policy-templates.0.objectDefinition.spec.object-templates.2.objectDefinition.metadata.name
+          - spec.policy-templates.0.objectDefinition.spec.object-templates.2.objectDefinition.spec.template.spec.volumes.[name=config].configMap.name
+          - spec.policy-templates.0.objectDefinition.spec.object-templates.2.objectDefinition.spec.template.spec.volumes.[name=work].persistentVolumeClaim.claimName
+      - select: {kind: Policy}
+        fieldPaths:
+          - spec.policy-templates.0.objectDefinition.spec.object-templates.2.objectDefinition.spec.template.metadata.annotations.[oc-mirror.ngc747/isc-b64]
+        options: {delimiter: '"', index: 3}
+      - select: {kind: PlacementBinding}
+        fieldPaths: [metadata.name, subjects.0.name]
+      - select: {kind: ClusterGroupUpgrade}
+        fieldPaths: [metadata.name, spec.managedPolicies.0]
+      - select: {kind: ConfigMap, name: oc-mirror-isc}
+        fieldPaths: [metadata.name]
+
+  # ---------------------------------------------------------------- Job settings
+  - source: {kind: ConfigMap, name: oc-mirror-params, fieldPath: data.OC_MIRROR_IMAGE}
+    targets:
+      - select: {kind: Policy}
+        fieldPaths:
+          - spec.policy-templates.0.objectDefinition.spec.object-templates.2.objectDefinition.spec.template.spec.containers.[name=oc-mirror].image
+  - source: {kind: ConfigMap, name: oc-mirror-params, fieldPath: data.AUTH_SECRET}
+    targets:
+      - select: {kind: Policy}
+        fieldPaths:
+          - spec.policy-templates.0.objectDefinition.spec.object-templates.2.objectDefinition.spec.template.spec.volumes.[name=auth].secret.secretName
+  - source: {kind: ConfigMap, name: oc-mirror-params, fieldPath: data.MIRROR_REGISTRY}
+    targets:
+      - select: {kind: Policy}
+        fieldPaths:
+          - spec.policy-templates.0.objectDefinition.spec.object-templates.2.objectDefinition.spec.template.spec.containers.[name=oc-mirror].env.[name=MIRROR_REGISTRY].value
+  - source: {kind: ConfigMap, name: oc-mirror-params, fieldPath: data.MIRROR_PREFIX}
+    targets:
+      - select: {kind: Policy}
+        fieldPaths:
+          - spec.policy-templates.0.objectDefinition.spec.object-templates.2.objectDefinition.spec.template.spec.containers.[name=oc-mirror].env.[name=MIRROR_PREFIX].value
+  - source: {kind: ConfigMap, name: oc-mirror-params, fieldPath: data.DEST_TLS_VERIFY}
+    targets:
+      - select: {kind: Policy}
+        fieldPaths:
+          - spec.policy-templates.0.objectDefinition.spec.object-templates.2.objectDefinition.spec.template.spec.containers.[name=oc-mirror].env.[name=DEST_TLS_VERIFY].value
+  - source: {kind: ConfigMap, name: oc-mirror-params, fieldPath: data.PVC_SIZE}
+    targets:
+      - select: {kind: Policy}
+        fieldPaths:
+          - spec.policy-templates.0.objectDefinition.spec.object-templates.1.objectDefinition.spec.resources.requests.storage

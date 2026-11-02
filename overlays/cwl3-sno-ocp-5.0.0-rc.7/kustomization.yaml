@@ -1,0 +1,27 @@
+# Run: OCP 5.0.0-rc.7 (candidate-5.0), release only -> hub Quay quayadmin/ocp5-candidate,
+# workload in hub namespace cwl3-sno. Tested 2026-11-02 (198 images, rc=0, CGU Completed).
+#   oc kustomize overlays/cwl3-sno-ocp-5.0.0-rc.7     # review
+#   oc apply -k  overlays/cwl3-sno-ocp-5.0.0-rc.7     # run
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+components:
+  - ../../components/params
+
+configMapGenerator:
+  # values for components/params; local-config => used at build time, never applied
+  - name: oc-mirror-params
+    envs: [params.env]
+    options:
+      disableNameSuffixHash: true
+      annotations:
+        config.kubernetes.io/local-config: "true"
+  # the ImageSetConfiguration this run mirrors (renamed to RUN_NAME, moved to NAMESPACE)
+  - name: oc-mirror-isc
+    files: [isc.yaml]
+    options:
+      disableNameSuffixHash: true
+      labels:
+        app.kubernetes.io/part-of: oc-mirror-cgu
+        oc-mirror.ngc747/stage: "01"

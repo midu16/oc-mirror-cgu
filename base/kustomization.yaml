@@ -1,0 +1,13 @@
+# Generic base. NOT meant to be applied on its own: placeholder values (RUN_NAME, NAMESPACE,
+# MIRROR_REGISTRY, ...) are replaced by components/params from an overlay's params.env.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - policy.yaml
+  - cgu.yaml
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: oc-mirror-cgu
+    includeSelectors: false
+    includeTemplates: false

@@ -1,0 +1,9 @@
+apiVersion: mirror.openshift.io/v2alpha1
+kind: ImageSetConfiguration
+mirror:
+  platform:
+    channels:
+    - name: candidate-5.0
+      minVersion: 5.0.0-rc.7
+      maxVersion: 5.0.0-rc.7
+  operators:
